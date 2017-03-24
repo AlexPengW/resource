@@ -1,9 +1,9 @@
 # <center>CRF及求解算法L-BFGS,Line Search原理及代码分析</center>
-<center>王鹏（qqlantian@126.com）</center><center>Last  updated on 2017-2-17</center>
+<center>wangpeng（qqlantian@126.com）</center><center>Last  updated on 2017-03-24</center>
 如需获取最新文档请访问https://github.com/AlexPengW/resource/tree/master/pdf
 
 ##Abstract
-　　本文首先介绍**CRF**[^1]模型及用来提高CRF求解和预测效率的**Forward-Backward** 算法，然后介绍经典的无约束优化算法**Line Search**[^2]，**DFP**[^3]，**BFGS**，**L-BFGS**[^4], **IIS**[^5]，给出一些必要性的证明，最后结合[CRF++代码][crfpp]讲解CRF和L-BFGS的代码实现。
+　　本文首先介绍**CRF**[^1]（条件随机场）模型及用来提高CRF求解和预测效率的**Forward-Backward** 算法，然后介绍经典的无约束优化算法**Line Search**[^2]，**DFP**[^3]，**BFGS**，**L-BFGS**[^4], **IIS**[^5]，给出一些必要性的证明，最后结合[CRF++代码][crfpp]讲解CRF和L-BFGS的代码实现。
 
 [TOC]
 
@@ -485,7 +485,6 @@ void Node::calcExpectation(double *expected, double Z, size_t size) const {
 }
 ```
 ###L-BFGS代码分析
-带L1正则化case我还没看，这里就忽略掉了
 ``` cpp
 void LBFGS::lbfgs_optimize(int size, //数组x和g的长度
                            int msize,//即lbfgs里面的m，使用最近m次迭代的函数信息
@@ -494,15 +493,23 @@ void LBFGS::lbfgs_optimize(int size, //数组x和g的长度
                            const double *g,//当前梯度
                            double *diag,//存放H(-m)即初始对角阵                         
                            double *w,//存放最近m次迭代的ρ，y，s，以及计算搜索方向时用来存放临时变量α，q，r，等
-                           double *v,//对于L2正则化v=g
-                           int *iflag) {
+                           bool orthant, //是否采取L1正则化
+                           double C, //正则化权重因子
+                           double *v,//对于L2正则化v=g，对于L1正则化，v是伪梯度
+                           double *xi,//用于L1正则化时存放x的符号，用来限定Line Search在一个象限里面
+                           int *iflag//见下文解释
+                           ) {
   double yy = 0.0;
   double ys = 0.0;
   int bound = 0;
   int cp = 0;
+  if (orthant) {
+    --xi;
+    pseudo_gradient(size, v, x, g, C);//计算伪梯度
+  }
   if (*iflag == 1) goto L172;//*iflag为1意味着上次执行了Line search(mcsrch)，并且未找到满足Wolfe condition的step，但计算出一个新的step，并同时更新了x数组，返回到CRF主程序，让CRF计算step步长时的函数值和梯度值，执行到这里时，说明CRF计算完毕，重新进来直接跳到L172，让mcsrch评估当前步长是否满足Wolfe condition
   if (*iflag == 2) goto L100;//这个分支代码里未用，感觉是由用户自己生成diag（H(-m)）来用
-  //执行到这里意味着iflag_ = 0，iflag_只会出现一次，只有第一次调用lbfgs时才为0
+  //执行到这里意味着iflag_ = 0，iflag_=0只会出现一次，只有第一次调用lbfgs时才为0
   //w_.resize(size * (2 * msize + 1) + 2 * msize);
   //w[0]未用
   //w[ (1, size) ] 存放lbfgs迭代时的临时变量q或r; 在计算出line search搜索方向后，w[ (1, size) ]也用来存放梯度f'(x_k)，以便后面确定好步长后，来计算梯度变化（w[iypt + npt + i] = g[i] - w[i];）注意每次传进来的g可能不是f'(x_k)，也有可能是f'(x_k+step*p_k)
@@ -528,6 +535,11 @@ void LBFGS::lbfgs_optimize(int size, //数组x和g的长度
   //执行到这里，或者是从第一次调用lbfgs进来的（iflag=0），或者就是从while循环下面mcsrch之后跳转过来的，mcsrch找到满足Wolfe condition的step后，会继续下一轮循环，跑到这里以重新用lbfgs计算新的迭代方向。所以也意味着运行到这里后，下次传给mcsrch的是新的搜索方向。
     ++iter;
     info = 0;//每次计算出新的搜索方向，info要置为1，这样mcsrch知道传进来的参数是f(x_k),f'(x_k),mcsrch会把这个值保存下来，后续跟其他f(x_k+step*p_k),f'(x_k+step*p_k)比较，判断是否满足Wolfe condition
+    if (orthant) {//L1正则化初始化xi，如前所述，执行到这里说明开启了新一轮Line Search，即x_k已经找到，开始寻找x_(k+1)，所以初始化符号向量，以将后续Line Search限制在一个象限
+      for (int i = 1; i <= size; ++i) {
+        xi[i] = (x[i] != 0 ? sigma(x[i]) : sigma(-v[i]));
+      }
+    }
     if (iter == 1) goto L165;//第一次迭代，没有历史s，y等搜索信息，所以直接用上面iflag=0计算的初始搜索方向
     ys = ddot_(size, &w[iypt + npt + 1], &w[ispt + npt + 1]);
     yy = ddot_(size, &w[iypt + npt + 1], &w[iypt + npt + 1]);
@@ -576,6 +588,11 @@ void LBFGS::lbfgs_optimize(int size, //数组x和g的长度
       ++cp;
       if (cp == msize) cp = 0;
     }
+    if (orthant) {//L1正则化，则校正搜索方向，以使搜索方向不与伪梯度相反
+      for (int i = 1; i <= size; ++i) {
+        w[i] = (sigma(w[i]) == sigma(-v[i]) ? w[i] : 0);
+      }
+    }
     //将搜索方向r=-H*g存放到w[ispt + point * size] 
     for (int i = 1; i <= size; ++i) {
       w[ispt + point * size + i] = w[i];
@@ -599,6 +616,11 @@ void LBFGS::lbfgs_optimize(int size, //数组x和g的长度
     mcsrch_->mcsrch(size, &x[1], f, &v[1], &w[ispt + point * size + 1],
                     &stp, &info, &nfev, &diag[1]);
     if (info == -1) {
+      if (orthant) {//限制一次Line Search搜索的一系列点都在指定象限
+        for (int i = 1; i <= size; ++i) {
+          x[i] = (sigma(x[i]) == sigma(xi[i]) ? x[i] : 0);
+        }
+      }
       *iflag = 1;  //未找到合适步长，就用插值方法计算出新的步长，并更新x数组，返回CRF程序，让CRF计算新的x处的函数值和梯度
       return;
     }
